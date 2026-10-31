@@ -1,1 +1,1 @@
-This is the code of the VEX V5 team 886F, but now 800W
+Code for 800W using lemlib. With tuning for PID and odom
