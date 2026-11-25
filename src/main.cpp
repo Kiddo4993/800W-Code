@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 
+
 // Hardware Setup
 pros::MotorGroup leftMotors({-3, -4, -5}, pros::MotorGearset::blue);
 pros::MotorGroup rightMotors({6, 7, 8}, pros::MotorGearset::blue);
@@ -64,9 +65,9 @@ lemlib::ControllerSettings lateralController(
 );
 
 lemlib::ControllerSettings angularController(
-    1,      // kP: proportional gain
+    2,      // kP: proportional gain
     0,      // kI: integral gain
-    7,      // kD: derivative gain
+    12,      // kD: derivative gain
     3,      // Small error threshold
     1,      // Small error timeout (ms)
     100,    // Large error threshold
@@ -84,7 +85,7 @@ lemlib::Chassis chassis(
 
 // Lift settings and PID state
 constexpr int liftMaxHeight = 216000;
-constexpr int liftMinHeight = 10000;
+// constexpr int liftMinHeight = 13000;
 constexpr int manualLiftControl = -1;
 
 static volatile int liftTarget = manualLiftControl;
@@ -92,29 +93,85 @@ static volatile int liftLoops = 0;
 static volatile int liftLastTarget = manualLiftControl;
 static volatile int liftOutput = 0;
 
-void spinTurn(int speed, int theta, int error) {
-    while (true) {
-        double difference = theta - imu.get_heading();
-
-        if (difference > 180) difference -= 360;
-        if (difference < -180) difference += 360;
-
-        if (std::abs(difference) <= error) break;
-
-        if (difference > 0) {
-            leftMotors.move(speed/8);
-            rightMotors.move(-speed);
+bool waitForLift(int target, int tolerance = 2000, int timeout = 2000) {
+    uint32_t start = pros::millis();
+    while (std::abs(liftRotation.get_position() - target) > tolerance) {
+        if (pros::millis() - start >= timeout) {
+            return false;
         }
-        else {
-            leftMotors.move(-speed);
-            rightMotors.move(speed/8);
-        }
-
         pros::delay(10);
     }
+    return true;
+}
 
+void spinTurn(int maxSpeed, double target, double error) {
+    constexpr double kP = 5;
+    constexpr int minSpeed = 70;
+    constexpr int settleTime = 100;
+
+    int settled = 0;
+
+    while (true) {
+        double current = chassis.getPose().theta;
+        double difference = target - current;
+
+        while (difference > 180) difference -= 360;
+        while (difference < -180) difference += 360;
+
+        if (std::abs(difference) <= error) {
+            settled += 10;
+
+            leftMotors.move(0);
+            rightMotors.move(0);
+
+            if (settled >= settleTime) break;
+        } else {
+            settled = 0;
+
+            int speed = std::clamp(
+                static_cast<int>(std::abs(difference) * kP),
+                minSpeed,
+                maxSpeed
+            );
+
+            if (difference > 0) {
+                leftMotors.move(speed / 7);
+                rightMotors.move(-speed);
+            } else {
+                leftMotors.move(-speed);
+                rightMotors.move(speed / 7);
+            }
+        }
+        pros::delay(10);
+    }
     leftMotors.move(0);
     rightMotors.move(0);
+}
+
+void goalReset(int goalNumber) {
+    constexpr double goalCoordinates[8][2] = {
+        {-48,  24},
+        {-48, -24},
+        {-24, -48},
+        { 24, -48},
+        { 48, -24},
+        { 48,  24},
+        { 24,  48},
+        {-24,  48}
+    };
+
+    if (goalNumber < 1 || goalNumber > 8) return;
+
+    const double goalX = goalCoordinates[goalNumber - 1][0];
+    const double goalY = goalCoordinates[goalNumber - 1][1];
+
+    const double theta = chassis.getPose().theta * M_PI / 180.0;
+    const double heading = chassis.getPose().theta;
+
+    const double robotX = goalX + 7.0 * sin(theta);
+    const double robotY = goalY + 7.0 * cos(theta);
+
+    chassis.setPose(robotX, robotY, heading);
 }
 
 void liftToPosition(int targetPosition) {
@@ -141,16 +198,14 @@ void startSinglePin() {
     stopLiftMacro();
     wrist.retract();
     liftMotor.move(-127);
-    pros::delay(250);
-
+    pros::delay(300);
     wrist.extend();
+    pros::delay(100);
     clamp.move(-127);
     liftMotor.move(0);
     pros::delay(500);
-
     wrist.retract();
-    liftToPosition(10000);
-    clamp.move(60);
+    liftToPosition(30000);
 
     macroStep = macroStepState::idle;
 }
@@ -160,37 +215,46 @@ void startSinglePin() {
 void startMatchLoad() {
     stopLiftMacro();
 
-    uint32_t startTime = pros::millis();
-    while (liftRotation.get_position() > 0 &&
-           pros::millis() - startTime < 1500) {
-        liftMotor.move(-127);
-        pros::delay(10);
-    }
-    liftMotor.brake();
-    if (liftRotation.get_position() > 0) {
-        return;
-    }
+    liftMotor.move(-127);
+    pros::delay(400);
+    liftMotor.move(0);
     clamp.move(127);
-    pros::delay(200);
-    liftToPosition(10000);
+    pros::delay(300);
+    liftToPosition(8000);
 }
 
-// Function for auto for lift
+void drive(int power, int time){
+    leftMotors.move(power);
+    rightMotors.move(power);
+    pros::delay(time);
+    leftMotors.move(0);
+    rightMotors.move(0);
+}
+
+void score(int height) {
+    liftToPosition(height);
+    pros::delay(height / 500);
+
+    liftToPosition(height - 30000);
+    pros::delay(400);
+
+    clamp.move(-127);
+    liftToPosition(height);
+}
 
 void startIntakeLift(){
+    liftToPosition(13000);
+    wrist.extend();
     intake.move(127);
     clamp.move(127);
     intakeLift.retract();
-    pros::delay(1000);
+
+    pros::delay(200);
+    drive(-60, 100);
     intakeLift.extend();
-    leftMotors.move(-127);
-    rightMotors.move(-127);
+    pros::delay(1500);
+    wrist.retract();
     pros::delay(100);
-    leftMotors.move(0);
-    rightMotors.move(0);
-    pros::delay(1000);
-    intake.move(0);
-    clamp.move(60);
 
     macroStep = macroStepState::matchWaitDown;
     macroStepStart = pros::millis();
@@ -239,7 +303,6 @@ void initialize() {
 
         while (true) {
             const int target = liftTarget;
-
             if (target != manualLiftControl) {
                 const double currentPosition = liftRotation.get_position();
                 const double error = target - currentPosition;
@@ -279,16 +342,95 @@ void initialize() {
             pros::delay(10);
         }
     });
-    liftToPosition(10000);
+    liftToPosition(13000);
 }
 
-void autoskills() {}
+void pid(){
+    chassis.setPose(0,0,0);
+    chassis.moveToPoint(0, 24, 1000);
+}
+
+void autoskills(){}
 
 void disabled() {}
 
 void competition_initialize() {}
 
-void autonomous() {}
+void autonomous() {
+    chassis.setPose(-63.5, -13, 270);
+    liftToPosition(13000);
+    clamp.move(60);
+    wrist.retract();
+
+    // FIRST PIN
+    chassis.moveToPoint(-53, -20.5, 1000,
+        {.forwards = false, .minSpeed = 20, .earlyExitRange = 2});
+    chassis.waitUntilDone();
+    intakeLift.retract();
+    goalReset(2);
+    {
+        pros::Task turnTask([] {
+            spinTurn(127, 270, 2);
+        });
+        startSinglePin();
+        turnTask.join();
+    }
+
+    // SECOND PIN
+    intake.move(127);
+    chassis.moveToPoint(-60.5, -23, 500,
+        {.minSpeed = 10, .earlyExitRange = 2});
+    chassis.waitUntilDone();
+    startIntakeLift();
+    liftToPosition(50000);
+    if (!waitForLift(50000)) return;
+    chassis.moveToPoint(-48, -24, 1000,
+        {.forwards = false, .minSpeed = 10, .earlyExitRange = 8});
+    chassis.waitUntilDone();
+    goalReset(2);
+    {
+        pros::Task turnTask([] {
+            spinTurn(127, 180, 2);
+        });
+        score(50000);
+        intakeLift.retract();
+        turnTask.join();
+    }
+
+    // THIRD PIN
+    intake.move(127);
+    chassis.moveToPoint(-48, -36, 1000,
+        {.minSpeed = 10, .earlyExitRange = 2});
+    chassis.waitUntilDone();
+    startIntakeLift();
+    liftToPosition(85000);
+    if (!waitForLift(85000)) return;
+    chassis.moveToPoint(-48, -24, 1000,
+        {.forwards = false, .minSpeed = 10, .earlyExitRange = 8});
+    chassis.waitUntilDone();
+    goalReset(2);
+    {
+        pros::Task turnTask([] {
+            spinTurn(127, 90, 2);
+        });
+        score(85000);
+        intakeLift.retract();
+        turnTask.join();
+    }
+
+    // FOURTH PIN
+    drive(127, 200);
+    chassis.waitUntilDone();
+    startIntakeLift();
+    chassis.moveToPoint(-48, 24, 1000,
+        {.forwards = false, .minSpeed = 10, .earlyExitRange = 6});
+    pros::delay(300);
+    liftToPosition(70000);
+    chassis.waitUntilDone();
+    goalReset(1);
+    score(70000);
+
+}
 
 void opcontrol() {
 
@@ -296,9 +438,9 @@ void opcontrol() {
 
     bool matchLoadReady = false;
     while (true) {
-        const int drive = master.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y);
+        const int drive = -master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_Y);
         const int turn = static_cast<int>(
-            master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X) * 0.8
+            master.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_X) * 0.75
         );
         const int liftPosition = liftRotation.get_position();
 
@@ -320,38 +462,48 @@ void opcontrol() {
             stopLiftMacro();
             macroStep = macroStepState::idle;
 
-            if (liftPosition > 14000) {
-                liftMotor.move(-127);
-            } else if (liftPosition > 10000) {
-                liftMotor.move(-15);
-            } else {
-                liftMotor.brake();
+
+                if (liftPosition > 14000) {
+                    liftMotor.move(-127);
+                } else if (liftPosition > 13000) {
+                    liftMotor.move(-15);
+                } else {
+                    liftMotor.brake();
+                }
             }
-        }
         else if (liftTarget == manualLiftControl) {
             liftMotor.brake();
         }
         // Intake control
-        if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L1)) {
+        if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L2)) {
             wrist.extend();
             intake.move(127);
-        } else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L2)) {
+        } else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L1)) {
+            clamp.move(-127);
             intake.move(-127);
         } else {
             intake.move(0);
         }
 
         if (macroStep == macroStepState::idle) {
-            if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L1)) {
-                clamp.move(127);
-            } else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L2)) {
-                clamp.move(-127);
+            if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_L2)) {
+                liftToPosition(13000);
+            } else if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_L1)) {
+                liftToPosition(liftRotation.get_position()+60000);
             } else {
-                clamp.move(60);
+                if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L1)) {
+                    clamp.move(-100);
+                    intake.move(-100);
+                }
+                else{
+                    clamp.move(60);
+                }
             }
         }
 
         if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_Y)) {
+            intakeLift.retract();
+            pros::delay(3000);
             startIntakeLift();
         }
 
@@ -364,7 +516,7 @@ void opcontrol() {
         if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_RIGHT)
             && macroStep == macroStepState::idle) {
             if (!matchLoadReady) {
-                liftToPosition(19000);
+                liftToPosition(15500);
                 wrist.retract();
                 matchLoadReady = true;
             } else {
@@ -372,6 +524,15 @@ void opcontrol() {
                 matchLoadReady = false;
             }
         }
+        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_LEFT)) {
+            startSinglePin();
+        }
+        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_UP)) {
+            clamp.move(-127);
+            intake.move(-127);
+        }
         pros::delay(20);
+        
     }
+        
 }
